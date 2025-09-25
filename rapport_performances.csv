@@ -1,0 +1,8 @@
+Modèle,Type,Anomalies détectées,Exactitude,F1-Score
+Isolation Forest,Non supervisé,10,,
+One-Class SVM,Non supervisé,10,,
+K-Means,Non supervisé,42,,
+DBSCAN,Non supervisé,74,,
+Random Forest,Supervisé,1,0.95,0.6666666666666666
+SVM,Supervisé,3,0.85,0.4
+XGBoost,Supervisé,1,0.95,0.6666666666666666

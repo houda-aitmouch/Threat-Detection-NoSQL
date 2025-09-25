@@ -1,0 +1,990 @@
+import pandas as pd
+from tensorflow.keras.layers import Input, Dense, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.svm import OneClassSVM, SVC
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import confusion_matrix, classification_report, silhouette_score, roc_curve, auc
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+import xgboost as xgb
+import math
+from scipy.stats import zscore
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# Fonction pour créer un jeu de données synthétique pour les tests
+def create_synthetic_data(n_samples=200, n_features=8):
+   
+    np.random.seed(42)
+    # Données normales
+    X_normal = np.random.randn(n_samples - 20, n_features)
+    
+    # Anomalies
+    X_anomaly = np.random.randn(20, n_features) * 2 + 3
+    
+    # Combinaison des données
+    X = np.vstack([X_normal, X_anomaly])
+    
+    # Étiquettes (1 pour anomalies, 0 pour normaux)
+    y = np.zeros(n_samples)
+    y[n_samples - 20:] = 1
+    
+    # Création d'un DataFrame avec des noms de caractéristiques significatifs
+    feature_names = ['total_activities', 'after_hours_activities', 'weekend_activities',
+                    'unique_systems', 'unique_resources', 'activity_types',
+                    'activity_entropy', 'temporal_entropy']
+    
+    df = pd.DataFrame(X, columns=feature_names)
+    df['user'] = [f'user_{i}' for i in range(n_samples)]
+    df['is_anomaly'] = y
+    
+    # Ajout de bruit et de corrélations
+    df['after_hours_ratio'] = df['after_hours_activities'] / (df['total_activities'].abs() + 1)
+    df['weekend_ratio'] = df['weekend_activities'] / (df['total_activities'].abs() + 1)
+    
+    
+    return df
+
+
+# Analyse non supervisée
+# Intégration de l'autoencoder dans la fonction d'analyse non supervisée
+def unsupervised_analysis(df):
+    print("\n=== ANALYSE NON SUPERVISÉE ===")
+    numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.drop(['is_anomaly'], errors='ignore')
+    #Normalisation des données et Création de la matrice X des données
+    X = df[numeric_columns].values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    results = {}
+    #10% des données sont considérées comme anormales).
+    #les anomalies soient étiquetées avec 1 et les points normaux avec 0.
+    #Les anomalies (-1) deviennent 1 et les points normaux (1) deviennent 0.
+    # 1. Isolation Forest
+    print("Exécution de l'Isolation Forest...")
+    iso_forest = IsolationForest(contamination=0.1, random_state=42)
+    y_pred_iso = iso_forest.fit_predict(X_scaled)
+    scores_iso = -iso_forest.decision_function(X_scaled)
+    results['isolation_forest'] = {
+        'predictions': np.where(y_pred_iso == -1, 1, 0),
+        'scores': scores_iso,
+        'model': iso_forest
+    }
+    
+    # 2. One-Class SVM
+    print("Exécution de One-Class SVM...")
+    ocsvm = OneClassSVM(nu=0.1, kernel="rbf", gamma='auto')
+    y_pred_ocsvm = ocsvm.fit_predict(X_scaled)
+    scores_ocsvm = -ocsvm.decision_function(X_scaled)
+    results['ocsvm'] = {
+        'predictions': np.where(y_pred_ocsvm == -1, 1, 0),
+        'scores': scores_ocsvm,
+        'model': ocsvm
+    }
+    
+    # 3. K-Means Clustering
+    print("Exécution de K-Means...")
+    kmeans = KMeans(n_clusters=2, random_state=42)
+    y_pred_kmeans = kmeans.fit_predict(X_scaled)
+    
+    # Déterminer quel cluster représente les anomalies (le plus petit)
+    counts = np.bincount(y_pred_kmeans)
+    anomaly_cluster = np.argmin(counts)
+    
+    # Calculer les distances aux centroïdes
+    distances = np.min(kmeans.transform(X_scaled), axis=1)
+    
+    results['kmeans'] = {
+        'predictions': np.where(y_pred_kmeans == anomaly_cluster, 1, 0),
+        'scores': distances,
+        'model': kmeans
+    }
+    
+    # 4. DBSCAN
+    print("Exécution de DBSCAN...")
+    dbscan = DBSCAN(eps=1.0, min_samples=5)
+    y_pred_dbscan = dbscan.fit_predict(X_scaled)
+    
+    # Dans DBSCAN, -1 représente déjà les anomalies (points de bruit)
+    results['dbscan'] = {
+        'predictions': np.where(y_pred_dbscan == -1, 1, 0),
+        'scores': np.zeros(len(y_pred_dbscan)),  # DBSCAN ne fournit pas de scores directement
+        'model': dbscan
+    }
+    
+    # 5. Autoencoder Standard
+    print("Exécution de l'Autoencoder standard...")
+    y_pred_ae, scores_ae, ae_model, encoder_model, history_ae = autoencoder_anomaly_detection(X_scaled, contamination=0.1)
+    results['autoencoder'] = {
+        'predictions': y_pred_ae,
+        'scores': scores_ae,
+        'model': ae_model,
+        'encoder': encoder_model,
+        'history': history_ae
+    }
+    
+    # 6. Autoencoder Amélioré
+    print("Exécution de l'Autoencoder amélioré...")
+    y_pred_ae_imp, scores_ae_imp, ae_imp_model, encoder_imp_model, history_ae_imp, latent_rep, threshold = improved_autoencoder_anomaly_detection(X_scaled, contamination=0.1)
+    results['improved_autoencoder'] = {
+        'predictions': y_pred_ae_imp,
+        'scores': scores_ae_imp,
+        'model': ae_imp_model,
+        'encoder': encoder_imp_model,
+        'history': history_ae_imp,
+        'latent_representation': latent_rep,
+        'threshold': threshold
+    }
+    
+    # Réduction de dimension avec PCA pour la visualisation
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    # Création d'un dataframe pour les résultats
+    results_df = pd.DataFrame({
+        'user': df['user'],
+        'PC1': X_pca[:, 0],
+        'PC2': X_pca[:, 1],
+        'IsoForest_anomaly': results['isolation_forest']['predictions'],
+        'IsoForest_score': results['isolation_forest']['scores'],
+        'OCSVM_anomaly': results['ocsvm']['predictions'],
+        'OCSVM_score': results['ocsvm']['scores'],
+        'KMeans_anomaly': results['kmeans']['predictions'],
+        'KMeans_score': results['kmeans']['scores'],
+        'DBSCAN_anomaly': results['dbscan']['predictions'],
+        'Autoencoder_anomaly': results['autoencoder']['predictions'],
+        'Autoencoder_score': results['autoencoder']['scores'],
+        'ImprovedAE_anomaly': results['improved_autoencoder']['predictions'],
+        'ImprovedAE_score': results['improved_autoencoder']['scores']
+    })
+    
+    # Si des étiquettes réelles sont disponibles
+    if 'is_anomaly' in df.columns:
+        results_df['real_anomaly'] = df['is_anomaly'].values
+    
+    return results, results_df, X_pca
+
+
+# Analyse supervisée
+def supervised_analysis(df):
+    print("\n=== ANALYSE SUPERVISÉE ===")
+    
+    if 'is_anomaly' not in df.columns:
+        print("Erreur: Pas d'étiquettes disponibles pour l'apprentissage supervisé")
+        return None, None
+    
+    # Préparation des données
+    numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.drop(['is_anomaly'], errors='ignore')
+    X = df[numeric_columns].values
+    y = df['is_anomaly'].values
+    
+    # Standardisation
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Division train/test
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.3, random_state=42, stratify=y)
+    
+    results = {}
+    # 100 arbres
+    # 1. Random Forest
+    print("Entraînement de Random Forest...")
+    rf = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
+    rf.fit(X_train, y_train)
+    y_pred_rf = rf.predict(X_test)
+    y_prob_rf = rf.predict_proba(X_test)[:, 1]
+    
+    results['random_forest'] = {
+        'model': rf,
+        'y_true': y_test,
+        'y_pred': y_pred_rf,
+        'y_prob': y_prob_rf,
+        'cv_scores': cross_val_score(rf, X_scaled, y, cv=5, scoring='roc_auc')
+    }
+    #  trouver un hyperplan qui sépare les classes 
+    
+    # 2. SVM
+    print("Entraînement de SVM...")
+    svm = SVC(kernel='rbf', probability=True, class_weight='balanced', random_state=42)
+    svm.fit(X_train, y_train)
+    y_pred_svm = svm.predict(X_test)
+    y_prob_svm = svm.predict_proba(X_test)[:, 1]
+    
+    results['svm'] = {
+        'model': svm,
+        'y_true': y_test,
+        'y_pred': y_pred_svm,
+        'y_prob': y_prob_svm,
+        'cv_scores': cross_val_score(svm, X_scaled, y, cv=5, scoring='roc_auc')
+    }
+    
+    # 3. XGBoost
+    print("Entraînement de XGBoost...")
+    # Définir les poids de classe pour gérer le déséquilibre des classes
+    scale_pos_weight = np.sum(y == 0) / np.sum(y == 1)
+    
+    xgb_model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        learning_rate=0.1,
+        n_estimators=100,
+        max_depth=5,
+        random_state=42
+    )
+    
+    xgb_model.fit(X_train, y_train)
+    y_pred_xgb = xgb_model.predict(X_test)
+    y_prob_xgb = xgb_model.predict_proba(X_test)[:, 1]
+    
+    results['xgboost'] = {
+        'model': xgb_model,
+        'y_true': y_test,
+        'y_pred': y_pred_xgb,
+        'y_prob': y_prob_xgb,
+        'cv_scores': cross_val_score(xgb_model, X_scaled, y, cv=5, scoring='roc_auc')
+    }
+    
+    # Préparation des scores pour comparaison
+    eval_df = pd.DataFrame({
+        'real_anomaly': y_test,
+        'RF_pred': y_pred_rf,
+        'RF_prob': y_prob_rf,
+        'SVM_pred': y_pred_svm,
+        'SVM_prob': y_prob_svm,
+        'XGB_pred': y_pred_xgb,
+        'XGB_prob': y_prob_xgb
+    })
+    
+    return results, eval_df
+
+
+# Visualisations
+
+# Modification de la fonction de visualisation pour inclure l'autoencoder
+def create_visualizations(unsupervised_results, supervised_results, X_pca, df, unsup_df, sup_df=None):
+    print("\n=== CRÉATION DES VISUALISATIONS ===")
+    
+    # Configurations des plots
+    plt.style.use('seaborn-v0_8-darkgrid')
+    colors = ['#2C3E50', '#E74C3C', '#3498DB', '#2ECC71', '#F39C12', '#9B59B6']
+    
+    # 1. Distribution des scores d'anomalie par méthode non supervisée
+    plt.figure(figsize=(18, 12))
+    
+    plt.subplot(3, 2, 1)
+    sns.histplot(unsup_df['IsoForest_score'], kde=True, color=colors[0])
+    plt.title('Distribution des scores - Isolation Forest')
+    plt.xlabel('Score d\'anomalie')
+    
+    plt.subplot(3, 2, 2)
+    sns.histplot(unsup_df['OCSVM_score'], kde=True, color=colors[1])
+    plt.title('Distribution des scores - One-Class SVM')
+    plt.xlabel('Score d\'anomalie')
+    
+    plt.subplot(3, 2, 3)
+    sns.histplot(unsup_df['KMeans_score'], kde=True, color=colors[2])
+    plt.title('Distribution des scores - K-Means')
+    plt.xlabel('Distance au centroïde')
+    
+    plt.subplot(3, 2, 4)
+    sns.histplot(unsup_df['Autoencoder_score'], kde=True, color=colors[3])
+    plt.title('Distribution des scores - Autoencoder')
+    plt.xlabel('Erreur de reconstruction (MSE)')
+    
+    plt.subplot(3, 2, 5)
+    sns.histplot(unsup_df['ImprovedAE_score'], kde=True, color=colors[4])
+    plt.title('Distribution des scores - Autoencoder Amélioré')
+    plt.xlabel('Erreur de reconstruction (MSE)')
+    
+    plt.subplot(3, 2, 6)
+    if 'real_anomaly' in unsup_df.columns:
+        anomaly_counts = unsup_df[['IsoForest_anomaly', 'OCSVM_anomaly', 'KMeans_anomaly', 'DBSCAN_anomaly', 
+                                'Autoencoder_anomaly', 'ImprovedAE_anomaly', 'real_anomaly']].sum()
+    else:
+        anomaly_counts = unsup_df[['IsoForest_anomaly', 'OCSVM_anomaly', 'KMeans_anomaly', 'DBSCAN_anomaly',
+                                'Autoencoder_anomaly', 'ImprovedAE_anomaly']].sum()
+        
+    sns.barplot(x=anomaly_counts.index, y=anomaly_counts.values, palette=colors)
+    plt.title('Nombre d\'anomalies détectées par méthode')
+    plt.xticks(rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig('distribution_scores_non_supervise.png')
+    
+    # 2. Visualisation PCA des résultats non supervisés (y compris autoencoder)
+    plt.figure(figsize=(20, 12))
+    
+    # Isolation Forest
+    plt.subplot(2, 3, 1)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['IsoForest_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('Isolation Forest - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    # One-Class SVM
+    plt.subplot(2, 3, 2)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['OCSVM_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('One-Class SVM - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    # K-Means
+    plt.subplot(2, 3, 3)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['KMeans_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('K-Means - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    # DBSCAN
+    plt.subplot(2, 3, 4)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['DBSCAN_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('DBSCAN - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    # Autoencoder Standard
+    plt.subplot(2, 3, 5)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['Autoencoder_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('Autoencoder - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    # Autoencoder Amélioré
+    plt.subplot(2, 3, 6)
+    sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['ImprovedAE_anomaly'], 
+                   palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+    plt.title('Autoencoder Amélioré - Détection d\'anomalies (PCA)')
+    plt.xlabel('PC1')
+    plt.ylabel('PC2')
+    plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    
+    plt.tight_layout()
+    plt.savefig('pca_non_supervise.png')
+    
+    # 3. Comparaison par rapport aux étiquettes réelles
+    if 'real_anomaly' in unsup_df.columns:
+        plt.figure(figsize=(14, 6))
+        
+        # PCA avec étiquettes réelles
+        plt.subplot(1, 2, 1)
+        sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=unsup_df['real_anomaly'], 
+                       palette={0: colors[0], 1: colors[1]}, s=70, alpha=0.7)
+        plt.title('Données réelles (PCA)')
+        plt.xlabel('PC1')
+        plt.ylabel('PC2')
+        plt.legend(title='Anomalie réelle', labels=['Normal', 'Anomalie'])
+        
+        # Corrélation entre méthodes
+        plt.subplot(1, 2, 2)
+        correlation_cols = ['IsoForest_anomaly', 'OCSVM_anomaly', 'KMeans_anomaly', 'DBSCAN_anomaly',
+                          'Autoencoder_anomaly', 'ImprovedAE_anomaly', 'real_anomaly']
+        corr_matrix = unsup_df[correlation_cols].corr()
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=0.5)
+        plt.title('Corrélation entre les méthodes de détection')
+        
+        plt.tight_layout()
+        plt.savefig('comparaison_etiquettes_reelles.png')
+    
+    # 4. Performances des méthodes supervisées (si disponibles)
+    if supervised_results is not None and sup_df is not None:
+        plt.figure(figsize=(18, 10))
+        
+        # Matrices de confusion
+        plt.subplot(2, 3, 1)
+        rf_cm = confusion_matrix(sup_df['real_anomaly'], sup_df['RF_pred'])
+        sns.heatmap(rf_cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=['Normal', 'Anomalie'], yticklabels=['Normal', 'Anomalie'])
+        plt.title('Matrice de confusion - Random Forest')
+        plt.xlabel('Prédiction')
+        plt.ylabel('Réel')
+        
+        plt.subplot(2, 3, 2)
+        svm_cm = confusion_matrix(sup_df['real_anomaly'], sup_df['SVM_pred'])
+        sns.heatmap(svm_cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=['Normal', 'Anomalie'], yticklabels=['Normal', 'Anomalie'])
+        plt.title('Matrice de confusion - SVM')
+        plt.xlabel('Prédiction')
+        plt.ylabel('Réel')
+        
+        plt.subplot(2, 3, 3)
+        xgb_cm = confusion_matrix(sup_df['real_anomaly'], sup_df['XGB_pred'])
+        sns.heatmap(xgb_cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=['Normal', 'Anomalie'], yticklabels=['Normal', 'Anomalie'])
+        plt.title('Matrice de confusion - XGBoost')
+        plt.xlabel('Prédiction')
+        plt.ylabel('Réel')
+        
+        # Courbes ROC
+        plt.subplot(2, 3, 4)
+        fpr_rf, tpr_rf, _ = roc_curve(sup_df['real_anomaly'], sup_df['RF_prob'])
+        roc_auc_rf = auc(fpr_rf, tpr_rf)
+        
+        fpr_svm, tpr_svm, _ = roc_curve(sup_df['real_anomaly'], sup_df['SVM_prob'])
+        roc_auc_svm = auc(fpr_svm, tpr_svm)
+        
+        fpr_xgb, tpr_xgb, _ = roc_curve(sup_df['real_anomaly'], sup_df['XGB_prob'])
+        roc_auc_xgb = auc(fpr_xgb, tpr_xgb)
+        
+        plt.plot(fpr_rf, tpr_rf, color=colors[0], lw=2, label=f'Random Forest (AUC = {roc_auc_rf:.2f})')
+        plt.plot(fpr_svm, tpr_svm, color=colors[1], lw=2, label=f'SVM (AUC = {roc_auc_svm:.2f})')
+        plt.plot(fpr_xgb, tpr_xgb, color=colors[5], lw=2, label=f'XGBoost (AUC = {roc_auc_xgb:.2f})')
+        plt.plot([0, 1], [0, 1], color='gray', lw=1, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('Taux de faux positifs')
+        plt.ylabel('Taux de vrais positifs')
+        plt.title('Courbes ROC - Méthodes supervisées')
+        plt.legend(loc="lower right")
+        
+        # Feature Importance (Random Forest)
+        plt.subplot(2, 3, 5)
+        rf_model = supervised_results['random_forest']['model']
+        # Get feature names
+        numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.drop(['is_anomaly'], errors='ignore')
+        feature_importance_rf = pd.DataFrame({
+            'Feature': numeric_columns,
+            'Importance': rf_model.feature_importances_
+        }).sort_values(by='Importance', ascending=False)
+        
+        sns.barplot(x='Importance', y='Feature', data=feature_importance_rf.head(10), palette='viridis')
+        plt.title('Importance des caractéristiques - Random Forest')
+        
+        # Feature Importance (XGBoost)
+        plt.subplot(2, 3, 6)
+        xgb_model = supervised_results['xgboost']['model']
+        # Obtenir l'importance des caractéristiques pour XGBoost
+        feature_importance_xgb = pd.DataFrame({
+            'Feature': numeric_columns,
+            'Importance': xgb_model.feature_importances_
+        }).sort_values(by='Importance', ascending=False)
+        
+        sns.barplot(x='Importance', y='Feature', data=feature_importance_xgb.head(10), palette='plasma')
+        plt.title('Importance des caractéristiques - XGBoost')
+        
+        plt.tight_layout()
+        plt.savefig('performance_supervise.png')
+    
+    # 5. Visualisations spécifiques à l'autoencoder
+    plt.figure(figsize=(16, 10))
+    
+    # Courbe d'apprentissage de l'autoencoder standard
+    plt.subplot(2, 2, 1)
+    history = unsupervised_results['autoencoder']['history']
+    plt.plot(history.history['loss'], label='Train')
+    plt.plot(history.history['val_loss'], label='Validation')
+    plt.title('Courbe d\'apprentissage - Autoencoder')
+    plt.xlabel('Époque')
+    plt.ylabel('Erreur (MSE)')
+    plt.legend()
+    
+    # Courbe d'apprentissage de l'autoencoder amélioré
+    plt.subplot(2, 2, 2)
+    history_imp = unsupervised_results['improved_autoencoder']['history']
+    plt.plot(history_imp.history['loss'], label='Train')
+    plt.plot(history_imp.history['val_loss'], label='Validation')
+    plt.title('Courbe d\'apprentissage - Autoencoder Amélioré')
+    plt.xlabel('Époque')
+    plt.ylabel('Erreur (MSE)')
+    plt.legend()
+    
+    # Visualisation de l'espace latent pour l'autoencoder amélioré
+    plt.subplot(2, 2, 3)
+    latent_rep = unsupervised_results['improved_autoencoder']['latent_representation']
+    
+    if latent_rep.shape[1] >= 2:
+        # Si la dimension latente est au moins 2, on peut visualiser les deux premières dimensions
+        if 'real_anomaly' in unsup_df.columns:
+            hue_values = unsup_df['real_anomaly']
+            palette = {0: colors[0], 1: colors[1]}
+            title_suffix = "coloré par anomalies réelles"
+        else:
+            hue_values = unsup_df['ImprovedAE_anomaly']
+            palette = {0: colors[0], 1: colors[1]}
+            title_suffix = "coloré par anomalies détectées"
+            
+        sns.scatterplot(x=latent_rep[:, 0], y=latent_rep[:, 1], hue=hue_values, 
+                        palette=palette, s=70, alpha=0.7)
+        plt.title(f'Espace latent de l\'Autoencoder Amélioré ({title_suffix})')
+        plt.xlabel('Dimension 1')
+        plt.ylabel('Dimension 2')
+        plt.legend(title='Anomalie', labels=['Normal', 'Anomalie'])
+    else:
+        # Si dimension latente est 1, faire une visualisation 1D
+        plt.hist(latent_rep, bins=30, color=colors[0])
+        plt.title('Distribution de la représentation latente 1D')
+        plt.xlabel('Valeur de la dimension latente')
+        plt.ylabel('Fréquence')
+    
+    # Erreur de reconstruction vs seuil
+    plt.subplot(2, 2, 4)
+    threshold = unsupervised_results['improved_autoencoder']['threshold']
+    scores = unsup_df['ImprovedAE_score']
+    
+    # Tri des scores pour une meilleure visualisation
+    sorted_indices = np.argsort(scores)
+    sorted_scores = scores.iloc[sorted_indices]
+    
+    # Si on a les vraies étiquettes, colorier en fonction
+    if 'real_anomaly' in unsup_df.columns:
+        sorted_labels = unsup_df['real_anomaly'].iloc[sorted_indices]
+        colors_by_label = np.where(sorted_labels == 1, colors[1], colors[0])
+        plt.scatter(range(len(sorted_scores)), sorted_scores, c=colors_by_label, alpha=0.7, s=20)
+        plt.axhline(y=threshold, color='r', linestyle='--', label=f'Seuil = {threshold:.4f}')
+        plt.title('Erreurs de reconstruction vs Seuil (coloré par vraies anomalies)')
+    else:
+        plt.scatter(range(len(sorted_scores)), sorted_scores, c=colors[0], alpha=0.7, s=20)
+        plt.axhline(y=threshold, color='r', linestyle='--', label=f'Seuil = {threshold:.4f}')
+        plt.title('Erreurs de reconstruction vs Seuil')
+    
+    plt.xlabel('Échantillons (triés)')
+    plt.ylabel('Erreur de reconstruction (MSE)')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('visualisations_autoencoder.png')
+    
+    print("Visualisations sauvegardées dans le répertoire courant.")
+# Fonction principaledef main():
+    print("=== COMPARAISON DES MODÈLES SUPERVISÉS ET NON SUPERVISÉS AVEC NEO4J ET AUTOENCODERS ===\n")
+    
+    # Connexion à Neo4j ou création des données synthétiques (comme avant)
+    try:
+        from neo4j_setup import connect_to_neo4j
+        
+        # Connexion à Neo4j
+        uri = "bolt://localhost:7689"
+        username = "neo4j"
+        password = "2004@2004"
+        graph = connect_to_neo4j(uri, username, password)
+        
+        if graph is None:
+            print("Impossible de se connecter à Neo4j. Exécution avec des données synthétiques à la place...")
+            # Création des données synthétiques
+            print("Création de données synthétiques pour la démonstration...")
+            df = create_synthetic_data(n_samples=200, n_features=8)
+        else:
+            # Extraction des caractéristiques pour ML depuis Neo4j
+            from neo4j_analysis import extract_features_for_ml
+            df = extract_features_for_ml(graph)
+            
+            # Création d'un jeu de données étiquetées (si nécessaire)
+            if 'is_anomaly' not in df.columns:
+                print("Pas d'étiquettes d'anomalies trouvées, création d'étiquettes synthétiques avec Isolation Forest...")
+                numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns
+                X = df[numeric_columns].values
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                
+                iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                y_pred = iso_forest.fit_predict(X_scaled)
+                df['is_anomaly'] = np.where(y_pred == -1, 1, 0)
+                
+                print(f"Étiquettes générées: {df['is_anomaly'].sum()} anomalies détectées sur {len(df)} utilisateurs")
+    
+    except ImportError:
+        print("Module Neo4j non trouvé. Exécution avec des données synthétiques à la place...")
+        df = create_synthetic_data(n_samples=200, n_features=8)
+    
+    print(f"Données préparées: {df.shape[0]} échantillons, {df.shape[1]} caractéristiques")
+    
+    # Analyse non supervisée (maintenant avec autoencoders)
+    unsupervised_results, unsup_df, X_pca = unsupervised_analysis(df)
+    
+    # Analyse supervisée
+    supervised_results, sup_df = supervised_analysis(df)
+    
+    # Créer les visualisations (mises à jour pour inclure les autoencoders)
+    create_visualizations(unsupervised_results, supervised_results, X_pca, df, unsup_df, sup_df)
+    
+    # Résumé des résultats (mis à jour pour inclure les autoencoders)
+    print("\n=== RÉSUMÉ DES RÉSULTATS ===")
+    print("1. Modèles non supervisés:")
+    print(f"   - Isolation Forest: {unsup_df['IsoForest_anomaly'].sum()} anomalies détectées")
+    print(f"   - One-Class SVM: {unsup_df['OCSVM_anomaly'].sum()} anomalies détectées")
+    print(f"   - K-Means: {unsup_df['KMeans_anomaly'].sum()} anomalies détectées")
+    print(f"   - DBSCAN: {unsup_df['DBSCAN_anomaly'].sum()} anomalies détectées")
+    print(f"   - Autoencoder standard: {unsup_df['Autoencoder_anomaly'].sum()} anomalies détectées")
+    print(f"   - Autoencoder amélioré: {unsup_df['ImprovedAE_anomaly'].sum()} anomalies détectées")
+    
+    if supervised_results is not None:
+        from sklearn.metrics import accuracy_score, f1_score
+        
+        print("\n2. Modèles supervisés:")
+        rf_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['RF_pred'])
+        rf_f1 = f1_score(sup_df['real_anomaly'], sup_df['RF_pred'])
+        
+        svm_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['SVM_pred'])
+        svm_f1 = f1_score(sup_df['real_anomaly'], sup_df['SVM_pred'])
+        
+        xgb_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['XGB_pred'])
+        xgb_f1 = f1_score(sup_df['real_anomaly'], sup_df['XGB_pred'])
+        
+        print(f"   - Random Forest: Précision = {rf_accuracy:.4f}, F1-Score = {rf_f1:.4f}")
+        print(f"   - SVM: Précision = {svm_accuracy:.4f}, F1-Score = {svm_f1:.4f}")
+        print(f"   - XGBoost: Précision = {xgb_accuracy:.4f}, F1-Score = {xgb_f1:.4f}")
+    
+    print("\nCes résultats ont été enregistrés sous forme de visualisations dans le répertoire courant.")
+    
+    # Afficher les visualisations principales
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('pca_non_supervise.png'))
+    plt.axis('off')
+    plt.title('Visualisation PCA des algorithmes non supervisés')
+    plt.show()
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('performance_supervise.png'))
+    plt.axis('off')
+    plt.title('Performance des modèles supervisés')
+    plt.show()
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('comparaison_supervise_non_supervise.png'))
+    plt.axis('off')
+    plt.title('Comparaison des approches supervisées et non supervisées')
+    plt.show()
+    
+    # Sauvegarder les résultats dans des fichiers CSV
+    unsup_df.to_csv('resultats_non_supervise.csv', index=False)
+    if sup_df is not None:
+        sup_df.to_csv('resultats_supervise.csv', index=False)
+        
+    # Créer un rapport des performances
+    if supervised_results is not None:
+        report = pd.DataFrame({
+            'Modèle': ['Isolation Forest', 'One-Class SVM', 'K-Means', 'DBSCAN', 'Random Forest', 'SVM', 'XGBoost'],
+            'Type': ['Non supervisé', 'Non supervisé', 'Non supervisé', 'Non supervisé', 'Supervisé', 'Supervisé', 'Supervisé'],
+            'Anomalies détectées': [
+                unsup_df['IsoForest_anomaly'].sum(),
+                unsup_df['OCSVM_anomaly'].sum(),
+                unsup_df['KMeans_anomaly'].sum(),
+                unsup_df['DBSCAN_anomaly'].sum(),
+                sup_df['RF_pred'].sum(),
+                sup_df['SVM_pred'].sum(),
+                sup_df['XGB_pred'].sum()
+            ]
+        })
+        
+        # Ajouter les métriques pour les modèles supervisés
+        if 'real_anomaly' in sup_df.columns:
+            report['Exactitude'] = [
+                None, None, None, None,
+                rf_accuracy,
+                svm_accuracy,
+                xgb_accuracy
+            ]
+            report['F1-Score'] = [
+                None, None, None, None,
+                rf_f1,
+                svm_f1,
+                xgb_f1
+            ]
+        
+        report.to_csv('rapport_performances.csv', index=False)
+        print("\nRapport des performances sauvegardé dans 'rapport_performances.csv'")
+
+
+if __name__ == "__main__":
+    print("=== COMPARAISON DES MODÈLES SUPERVISÉS ET NON SUPERVISÉS AVEC NEO4J ===\n")
+    
+    # Connexion à Neo4j
+    try:
+        from neo4j_setup import connect_to_neo4j
+        
+        # Connexion à Neo4j
+        uri = "bolt://localhost:7689"
+        username = "neo4j"
+        password = "2004@2004"
+        graph = connect_to_neo4j(uri, username, password)
+        
+        if graph is None:
+            print("Impossible de se connecter à Neo4j. Exécution avec des données synthétiques à la place...")
+            # Création des données synthétiques
+            print("Création de données synthétiques pour la démonstration...")
+            df = create_synthetic_data(n_samples=200, n_features=8)
+        else:
+            # Extraction des caractéristiques pour ML depuis Neo4j
+            from neo4j_analysis import extract_features_for_ml
+            df = extract_features_for_ml(graph)
+            
+            # Création d'un jeu de données étiquetées (si nécessaire)
+            # Utiliser Isolation Forest pour étiqueter les données si pas d'étiquettes existantes
+            if 'is_anomaly' not in df.columns:
+                print("Pas d'étiquettes d'anomalies trouvées, création d'étiquettes synthétiques avec Isolation Forest...")
+                numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns
+                X = df[numeric_columns].values
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                
+                iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                y_pred = iso_forest.fit_predict(X_scaled)
+                df['is_anomaly'] = np.where(y_pred == -1, 1, 0)
+                
+                print(f"Étiquettes générées: {df['is_anomaly'].sum()} anomalies détectées sur {len(df)} utilisateurs")
+    
+    except ImportError:
+        print("Module Neo4j non trouvé. Exécution avec des données synthétiques à la place...")
+        df = create_synthetic_data(n_samples=200, n_features=8)
+    
+    print(f"Données préparées: {df.shape[0]} échantillons, {df.shape[1]} caractéristiques")
+    
+    # Analyse non supervisée
+    unsupervised_results, unsup_df, X_pca = unsupervised_analysis(df)
+    
+    # Analyse supervisée
+    supervised_results, sup_df = supervised_analysis(df)
+    
+    # Créer les visualisations
+    create_visualizations(unsupervised_results, supervised_results, X_pca, df, unsup_df, sup_df)
+    
+    # Résumé des résultats
+    print("\n=== RÉSUMÉ DES RÉSULTATS ===")
+    print("1. Modèles non supervisés:")
+    print(f"   - Isolation Forest: {unsup_df['IsoForest_anomaly'].sum()} anomalies détectées")
+    print(f"   - One-Class SVM: {unsup_df['OCSVM_anomaly'].sum()} anomalies détectées")
+    print(f"   - K-Means: {unsup_df['KMeans_anomaly'].sum()} anomalies détectées")
+    print(f"   - DBSCAN: {unsup_df['DBSCAN_anomaly'].sum()} anomalies détectées")
+    
+    if supervised_results is not None:
+        from sklearn.metrics import accuracy_score, f1_score
+        
+        print("\n2. Modèles supervisés:")
+        rf_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['RF_pred'])
+        rf_f1 = f1_score(sup_df['real_anomaly'], sup_df['RF_pred'])
+        
+        svm_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['SVM_pred'])
+        svm_f1 = f1_score(sup_df['real_anomaly'], sup_df['SVM_pred'])
+        
+        xgb_accuracy = accuracy_score(sup_df['real_anomaly'], sup_df['XGB_pred'])
+        xgb_f1 = f1_score(sup_df['real_anomaly'], sup_df['XGB_pred'])
+        
+        print(f"   - Random Forest: Précision = {rf_accuracy:.4f}, F1-Score = {rf_f1:.4f}")
+        print(f"   - SVM: Précision = {svm_accuracy:.4f}, F1-Score = {svm_f1:.4f}")
+        print(f"   - XGBoost: Précision = {xgb_accuracy:.4f}, F1-Score = {xgb_f1:.4f}")
+    
+    print("\nCes résultats ont été enregistrés sous forme de visualisations dans le répertoire courant.")
+    
+    # Afficher les visualisations principales
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('pca_non_supervise.png'))
+    plt.axis('off')
+    plt.title('Visualisation PCA des algorithmes non supervisés')
+    plt.show()
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('performance_supervise.png'))
+    plt.axis('off')
+    plt.title('Performance des modèles supervisés')
+    plt.show()
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(plt.imread('comparaison_supervise_non_supervise.png'))
+    plt.axis('off')
+    plt.title('Comparaison des approches supervisées et non supervisées')
+    plt.show()
+    
+    # Sauvegarder les résultats dans des fichiers CSV
+    unsup_df.to_csv('resultats_non_supervise.csv', index=False)
+    if sup_df is not None:
+        sup_df.to_csv('resultats_supervise.csv', index=False)
+        
+    # Créer un rapport des performances
+    if supervised_results is not None:
+        report = pd.DataFrame({
+            'Modèle': ['Isolation Forest', 'One-Class SVM', 'K-Means', 'DBSCAN', 'Random Forest', 'SVM', 'XGBoost'],
+            'Type': ['Non supervisé', 'Non supervisé', 'Non supervisé', 'Non supervisé', 'Supervisé', 'Supervisé', 'Supervisé'],
+            'Anomalies détectées': [
+                unsup_df['IsoForest_anomaly'].sum(),
+                unsup_df['OCSVM_anomaly'].sum(),
+                unsup_df['KMeans_anomaly'].sum(),
+                unsup_df['DBSCAN_anomaly'].sum(),
+                sup_df['RF_pred'].sum(),
+                sup_df['SVM_pred'].sum(),
+                sup_df['XGB_pred'].sum()
+            ]
+        })
+        
+        # Ajouter les métriques pour les modèles supervisés
+        if 'real_anomaly' in sup_df.columns:
+            report['Exactitude'] = [
+                None, None, None, None,
+                rf_accuracy,
+                svm_accuracy,
+                xgb_accuracy
+            ]
+            report['F1-Score'] = [
+                None, None, None, None,
+                rf_f1,
+                svm_f1,
+                xgb_f1
+            ]
+        
+        report.to_csv('rapport_performances.csv', index=False)
+        print("\nRapport des performances sauvegardé dans 'rapport_performances.csv'")
+        
+        
+        
+        # Création de l'autoencoder standard pour la détection d'anomalies
+def create_autoencoder(input_dim, encoding_dim=3):
+    # Définition de l'encodeur
+    input_layer = Input(shape=(input_dim,))
+    
+    # Architecture de l'encodeur - diminution progressive de la dimension
+    encoder = Dense(int(input_dim * 0.75), activation='relu')(input_layer)
+    encoder = Dense(int(input_dim * 0.5), activation='relu')(encoder)
+    encoder = Dense(encoding_dim, activation='relu')(encoder)
+    
+    # Architecture du décodeur - augmentation progressive de la dimension
+    decoder = Dense(int(input_dim * 0.5), activation='relu')(encoder)
+    decoder = Dense(int(input_dim * 0.75), activation='relu')(decoder)
+    decoder = Dense(input_dim, activation='sigmoid')(decoder)
+    
+    # Création du modèle complet autoencoder
+    autoencoder = Model(inputs=input_layer, outputs=decoder)
+    
+    # Compilation du modèle avec une fonction de perte adaptée à la reconstruction
+    autoencoder.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+    
+    # Modèle de l'encodeur seul (pour obtenir la représentation comprimée)
+    encoder_model = Model(inputs=input_layer, outputs=encoder)
+    
+    return autoencoder, encoder_model
+
+
+# Fonction pour entraîner l'autoencoder standard et détecter les anomalies
+def autoencoder_anomaly_detection(X, contamination=0.1):
+    # Obtenir les dimensions de l'entrée
+    input_dim = X.shape[1]
+    
+    # Création des modèles
+    autoencoder, encoder = create_autoencoder(input_dim)
+    
+    # Division en ensembles d'entraînement et de validation (pour prévenir le surapprentissage)
+    X_train, X_val = train_test_split(X, test_size=0.2, random_state=42)
+    
+    # Early stopping pour éviter le surapprentissage
+    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    
+    # Entraînement de l'autoencoder
+    history = autoencoder.fit(
+        X_train, X_train,  # L'autoencoder apprend à reproduire l'entrée
+        epochs=100,
+        batch_size=32,
+        shuffle=True,
+        validation_data=(X_val, X_val),
+        callbacks=[early_stopping],
+        verbose=0
+    )
+    
+    # Reconstruction des données d'entrée
+    X_pred = autoencoder.predict(X)
+    
+    # Calcul de l'erreur de reconstruction (MSE)
+    mse = np.mean(np.power(X - X_pred, 2), axis=1)
+    
+    # Détermination du seuil pour les anomalies basé sur la contamination
+    threshold = np.percentile(mse, 100 * (1 - contamination))
+    
+    # Identification des anomalies (1 pour anomalie, 0 pour normal)
+    predictions = np.zeros(len(mse))
+    predictions[mse > threshold] = 1
+    
+    return predictions, mse, autoencoder, encoder, history
+
+
+# Création de l'autoencoder amélioré pour la détection d'anomalies
+def create_improved_autoencoder(input_dim, encoding_dim=3, dropout_rate=0.2):
+    # Définition de l'encodeur avec une architecture plus robuste
+    input_layer = Input(shape=(input_dim,))
+    
+    # Architecture de l'encodeur avec dropout pour éviter le surapprentissage
+    encoder = Dense(int(input_dim * 0.8), activation='relu')(input_layer)
+    encoder = Dropout(dropout_rate)(encoder)
+    encoder = Dense(int(input_dim * 0.5), activation='relu')(encoder)
+    encoder = Dropout(dropout_rate)(encoder)
+    encoder = Dense(encoding_dim, activation='relu')(encoder)
+    
+    # Couche de représentation latente (bottleneck)
+    bottleneck = encoder
+    
+    # Architecture du décodeur avec dropout
+    decoder = Dense(int(input_dim * 0.5), activation='relu')(bottleneck)
+    decoder = Dropout(dropout_rate)(decoder)
+    decoder = Dense(int(input_dim * 0.8), activation='relu')(decoder)
+    decoder = Dropout(dropout_rate)(decoder)
+    decoder = Dense(input_dim, activation='sigmoid')(decoder)
+    
+    # Création du modèle complet autoencoder
+    autoencoder = Model(inputs=input_layer, outputs=decoder)
+    
+    # Compilation du modèle avec une fonction de perte adaptée à la reconstruction
+    autoencoder.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+    
+    # Modèle de l'encodeur seul (pour obtenir la représentation comprimée)
+    encoder_model = Model(inputs=input_layer, outputs=bottleneck)
+    
+    return autoencoder, encoder_model
+
+
+# Fonction améliorée pour l'entraînement de l'autoencoder et la détection des anomalies
+def improved_autoencoder_anomaly_detection(X, contamination=0.1):
+    # Obtenir les dimensions de l'entrée
+    input_dim = X.shape[1]
+    
+    # Création des modèles avec l'architecture améliorée
+    autoencoder, encoder = create_improved_autoencoder(input_dim, encoding_dim=min(3, input_dim//2))
+    
+    # Division en ensembles d'entraînement et de validation
+    X_train, X_val = train_test_split(X, test_size=0.2, random_state=42)
+    
+    # Early stopping et réduction du taux d'apprentissage
+    early_stopping = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001)
+    
+    # Entraînement de l'autoencoder avec plus d'époques
+    history = autoencoder.fit(
+        X_train, X_train,
+        epochs=150,
+        batch_size=32,
+        shuffle=True,
+        validation_data=(X_val, X_val),
+        callbacks=[early_stopping, reduce_lr],
+        verbose=0
+    )
+    
+    # Reconstruction des données d'entrée
+    X_pred = autoencoder.predict(X)
+    
+    # Calcul de l'erreur de reconstruction (MSE) pour chaque échantillon
+    mse = np.mean(np.power(X - X_pred, 2), axis=1)
+    
+    # Détermination du seuil pour les anomalies basé sur la contamination
+    threshold = np.percentile(mse, 100 * (1 - contamination))
+    
+    # Identification des anomalies (1 pour anomalie, 0 pour normal)
+    predictions = np.zeros(len(mse))
+    predictions[mse > threshold] = 1
+    
+    # Obtenir la représentation latente pour la visualisation
+    latent_representation = encoder.predict(X)
+    
+    return predictions, mse, autoencoder, encoder, history, latent_representation, threshold
